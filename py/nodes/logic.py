@@ -1,6 +1,8 @@
+import logging
 from typing import Iterator, List, Tuple, Dict, Any, Union, Optional
 from _decimal import Context, getcontext
 from decimal import Decimal
+from comfy_execution.graph import DynamicPrompt
 from nodes import PreviewImage, SaveImage, NODE_CLASS_MAPPINGS as ALL_NODE_CLASS_MAPPINGS
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 from PIL.PngImagePlugin import PngInfo
@@ -635,6 +637,100 @@ except:
     GraphBuilder = None
 
 
+class LoopGraphInfo:
+    def __init__(self):
+        self.start_node_id: str = ""
+        self.end_node_id: str = ""
+
+        self.all_nodes: set[str] = set()
+        self.all_paths: list[list[str]] = []
+
+        self.all_path_nodes: set[str] = set()
+        self.all_path_inputs: set[str] = set()
+
+        self.adjacent_nodes: set[str] = set()
+
+    @staticmethod
+    def get_node_inputs(node: dict) -> set[str]:
+        inputs = set()
+        for v in node["inputs"].values():
+            if is_link(v):
+                inputs.add(v[0])
+        return inputs
+
+    def traverse_graph(self, dynprompt: DynamicPrompt,
+                       end_node_id: str, start_node_id: str, current_path: list[str]):
+        end_node = dynprompt.get_node(end_node_id)
+        self.all_nodes.add(end_node_id)
+
+        parents_visited = set()
+        for parent_id in self.get_node_inputs(end_node):
+            if parent_id in parents_visited:
+                continue
+            parents_visited.add(parent_id)
+
+            new_path = current_path.copy()
+            new_path.insert(0, parent_id)
+
+            if parent_id == start_node_id:
+                self.all_paths.append(new_path)
+
+                for path_node_id in new_path:
+                    self.all_path_nodes.add(path_node_id)
+                    if path_node_id == start_node_id:
+                        continue
+                    path_node = dynprompt.get_node(path_node_id)
+                    for input_id in self.get_node_inputs(path_node):
+                        self.all_path_inputs.add(input_id)
+            else:
+                self.traverse_graph(dynprompt, parent_id, start_node_id, new_path)
+
+    def parse_graph(self, dynprompt: DynamicPrompt, start_node_id: str):
+        self.start_node_id = start_node_id
+
+        for node_id in dynprompt.all_node_ids():
+            node = dynprompt.get_node(node_id)
+            if node["class_type"] not in ['easy forLoopEnd', 'easy whileLoopEnd']:
+                continue
+            for k, v in node["inputs"].items():
+                if is_link(v) and v[0] == self.start_node_id:
+                    self.end_node_id = node_id
+                    break
+        if len(self.end_node_id) == 0:
+            raise ValueError("No matching end node found for this forLoopStart node")
+
+        self.all_nodes = {self.start_node_id, self.end_node_id}
+        self.traverse_graph(dynprompt, self.end_node_id, self.start_node_id, [self.end_node_id])
+        self.adjacent_nodes = self.all_path_inputs.difference(self.all_path_nodes)
+
+        logging.info(f"[EasyUse - LoopGraph] Start Node [{self.start_node_id}] => "
+                     f"End Node [{self.end_node_id}] => "
+                     f"Adjacent Nodes: {self.adjacent_nodes}")
+
+    def set_adjacent_dependencies(self):
+        try:
+            import server
+            if not hasattr(server.PromptServer.instance.executor, 'caches'):
+                logging.warning("[EasyUse - LoopGraph] PromptServer.executor has no attribute 'caches', "
+                                "please use a patched version of ComfyUI")
+                return
+
+            for node_id in self.adjacent_nodes:
+                for c in server.PromptServer.instance.executor.caches.all:
+                    if not hasattr(c, "set_dependency"):
+                        logging.warning("[EasyUse - LoopGraph] Cache has no method 'set_dependency', "
+                                        "probably not using HierarchicalDependencyAwareCache, skipping")
+                        continue
+                    c.set_dependency(node_id, self.end_node_id)
+
+            logging.info(f"[EasyUse - LoopGraph] Set adjacent dependencies: "
+                         f"[{self.adjacent_nodes}] => [{self.end_node_id}]")
+        except Exception as e:
+            logging.error(f"[EasyUse - LoopGraph] Failed to set adjacent dependencies, "
+                          f"Exception [{e}]", exc_info=True)
+
+
+
 class whileLoopStart:
     def __init__(self):
         pass
@@ -647,6 +743,10 @@ class whileLoopStart:
             },
             "optional": {
             },
+            "hidden": {
+                "dynprompt": "DYNPROMPT",
+                "unique_id": "UNIQUE_ID",
+            },
         }
         for i in range(MAX_FLOW_NUM):
             inputs["optional"]["initial_value%d" % i] = (any_type,)
@@ -658,7 +758,11 @@ class whileLoopStart:
 
     CATEGORY = "EasyUse/Logic/While Loop"
 
-    def while_loop_open(self, condition, **kwargs):
+    def while_loop_open(self, condition, dynprompt = None, unique_id = None, **kwargs):
+        graph_info = LoopGraphInfo()
+        graph_info.parse_graph(dynprompt, unique_id)
+        graph_info.set_adjacent_dependencies()
+
         values = []
         for i in range(MAX_FLOW_NUM):
             values.append(kwargs.get("initial_value%d" % i, None))
@@ -812,7 +916,7 @@ class forLoopStart:
             },
             "hidden": {
                 "initial_value0": (any_type,),
-                "prompt": "PROMPT",
+                "dynprompt": "DYNPROMPT",
                 "extra_pnginfo": "EXTRA_PNGINFO",
                 "unique_id": "UNIQUE_ID"
             }
@@ -824,19 +928,18 @@ class forLoopStart:
 
     CATEGORY = "EasyUse/Logic/For Loop"
 
-    def for_loop_start(self, total, prompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
-        graph = GraphBuilder()
+    def for_loop_start(self, total, dynprompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
+        graph_info = LoopGraphInfo()
+        graph_info.parse_graph(dynprompt, unique_id)
+        graph_info.set_adjacent_dependencies()
+
         i = 0
         if "initial_value0" in kwargs:
             i = kwargs["initial_value0"]
 
-        initial_values = {("initial_value%d" % num): kwargs.get("initial_value%d" % num, None) for num in
-                          range(1, MAX_FLOW_NUM)}
-        while_open = graph.node("easy whileLoopStart", condition=total, initial_value0=i, **initial_values)
         outputs = [kwargs.get("initial_value%d" % num, None) for num in range(1, MAX_FLOW_NUM)]
         return {
             "result": tuple(["stub", i] + outputs),
-            "expand": graph.finalize(),
         }
 
 

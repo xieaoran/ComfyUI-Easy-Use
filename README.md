@@ -9,15 +9,18 @@ which helps to avoid OutOfMemory (OOM) errors during video generation workflows.
 
 **YOU NEED TO HACK COMFYUI SOURCE CODE TO MAKE IT WORK!**
 
-1. Append `HierarchicalDependencyAwareCache` to `comfy_execution/caching.py`
-   (implementation under [comfy_patches/comfy_execution/caching.py](./comfy_patches/comfy_execution/caching.py):
+1. Append `HierarchicalDependencyAwareCache` Class to `comfy_execution/caching.py`
+   (implementation under [comfy_patches/comfy_execution/caching.py#L480](./comfy_patches/comfy_execution/caching.py#L480))
 
-2. Change `DependencyAwareCache` to `HierarchicalDependencyAwareCache` 
+2. Append `_clean_cache_recursive` Function to `comfy_execution/caching.py > BasicCache`
+   (implementation under [comfy_patches/comfy_execution/caching.py#L176](./comfy_patches/comfy_execution/caching.py#L176))
+
+3. Change `DependencyAwareCache` to `HierarchicalDependencyAwareCache` 
    in `execution.py > CacheSet > init_dependency_aware_cache`
 
-3. Add a single line of `server.executor = self` in `execution.py > PromptExecutor > __init__`
+4. Add a single line of `server.executor = self` in `execution.py > PromptExecutor > __init__`
 
-4. Add a single line of `self.executor = None` in `server.py > PromptServer > __init__`
+5. Add a single line of `self.executor = None` in `server.py > PromptServer > __init__`
 
 *You could also use the provided files under [comfy_patches](./comfy_patches), 
 but these are provided as-is and may not be compatible with your specific ComfyUI version.*

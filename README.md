@@ -9,10 +9,10 @@ which helps to avoid OutOfMemory (OOM) errors during video generation workflows.
 
 **YOU NEED TO HACK COMFYUI SOURCE CODE TO MAKE IT WORK!**
 
-1. Append `HierarchicalDependencyAwareCache` Class to `comfy_execution/caching.py`
+1. Add `HierarchicalDependencyAwareCache` Class to `comfy_execution/caching.py`
    (implementation under [comfy_patches/comfy_execution/caching.py#L480](./comfy_patches/comfy_execution/caching.py#L480))
 
-2. Append `_clean_cache_recursive` Function to `comfy_execution/caching.py > BasicCache`
+2. Add `_clean_cache_recursive` Function to `comfy_execution/caching.py > BasicCache`
    (implementation under [comfy_patches/comfy_execution/caching.py#L176](./comfy_patches/comfy_execution/caching.py#L176))
 
 3. Change `DependencyAwareCache` to `HierarchicalDependencyAwareCache` 
